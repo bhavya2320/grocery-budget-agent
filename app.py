@@ -1,5 +1,5 @@
-
 import os
+import time
 import gradio as gr
 
 from typing import TypedDict
@@ -15,27 +15,25 @@ from langgraph.graph import StateGraph, END
 API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not API_KEY:
-
     raise RuntimeError(
         "GOOGLE_API_KEY is not configured. "
-        "Please add your Gemini API key "
-        "as an environment variable."
+        "Please add your Gemini API key in Render Environment Variables."
     )
 
 
 # ============================================================
-# GEMINI
+# GEMINI 3.7 FLASH
 # ============================================================
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.8-flash",
+    model="gemini-3.7-flash",
     google_api_key=API_KEY,
     temperature=0.3
 )
 
 
 # ============================================================
-# GROCERY DATA
+# GROCERY PRICE DATABASE
 # ============================================================
 
 GROCERY_DATA = """
@@ -83,7 +81,7 @@ Sugar - ₹50 per kg
 Tea - ₹250 per 500g
 
 These are demonstration prices only.
-They are not live market prices.
+They are NOT live market prices.
 """
 
 
@@ -92,13 +90,12 @@ They are not live market prices.
 # ============================================================
 
 class GroceryState(TypedDict):
-
     user_request: str
     final_report: str
 
 
 # ============================================================
-# GROCERY AGENT
+# GROCERY AGENT NODE
 # ============================================================
 
 def grocery_agent_node(state):
@@ -109,14 +106,12 @@ def grocery_agent_node(state):
 You are an intelligent AI Grocery Budget Agent.
 
 USER REQUEST:
-
 {user_request}
 
 GROCERY PRICE DATABASE:
-
 {GROCERY_DATA}
 
-Solve the user's grocery planning problem.
+Your task is to create a practical grocery budget plan.
 
 Analyze:
 
@@ -134,22 +129,26 @@ Then:
 - Create a grocery list.
 - Estimate practical quantities.
 - Calculate costs.
-- Compare with the budget.
-- Optimize the budget.
+- Compare total cost with the user's budget.
+- Optimize the grocery plan.
 - Create a meal plan.
 - Create a shopping checklist.
 - Give money-saving tips.
 
-Use ONLY the provided prices.
+IMPORTANT:
+
+Use ONLY the prices provided in the grocery database.
 
 Do NOT invent prices.
 
-If information is missing, make a reasonable assumption
-and mention it.
+If some information is missing, make a reasonable assumption
+and clearly mention the assumption.
 
-Return:
+Keep the answer practical and easy to understand.
 
-# 🛒 GROCERY BUDGET REPORT
+Return the following format:
+
+# 🛒 Grocery Budget Report
 
 ## 👤 Household Requirements
 
@@ -185,16 +184,15 @@ Return:
 ## 🍽️ Meal Plan
 
 ### Day 1
-
 **Breakfast:** ...
 **Lunch:** ...
 **Dinner:** ...
 
-Continue for every requested day.
+Continue for all requested days.
 
 ## 💡 Budget Optimization
 
-Explain the optimization.
+Explain how the budget was optimized.
 
 ## 💰 Money-Saving Tips
 
@@ -213,24 +211,92 @@ Explain the optimization.
 ## ⚠️ Price Disclaimer
 
 Prices shown are demonstration prices and are NOT live
-market prices. Please verify actual prices before purchasing.
+market prices. Verify actual prices before purchasing.
 """
 
-    try:
 
-        response = llm.invoke(prompt)
+    # ========================================================
+    # GEMINI REQUEST + 503 RETRY
+    # ========================================================
 
-        state["final_report"] = response.content
+    max_retries = 3
 
-    except Exception as e:
+    for attempt in range(max_retries):
 
-        state["final_report"] = f"""
+        try:
+
+            response = llm.invoke(prompt)
+
+            state["final_report"] = response.content
+
+            return state
+
+        except Exception as e:
+
+            error_message = str(e)
+
+            # ------------------------------------------------
+            # TEMPORARY 503 HIGH DEMAND ERROR
+            # ------------------------------------------------
+
+            if "503" in error_message or "UNAVAILABLE" in error_message:
+
+                if attempt < max_retries - 1:
+
+                    wait_time = 3 * (2 ** attempt)
+
+                    time.sleep(wait_time)
+
+                    continue
+
+                state["final_report"] = """
+# ⚠️ Gemini Temporarily Busy
+
+Gemini is currently experiencing high demand.
+
+The Grocery Budget Agent automatically retried the request
+multiple times, but the service is still unavailable.
+
+Please wait a little and click **Generate Plan** again.
+"""
+
+                return state
+
+            # ------------------------------------------------
+            # QUOTA / RATE LIMIT ERROR
+            # ------------------------------------------------
+
+            elif "429" in error_message or "RESOURCE_EXHAUSTED" in error_message:
+
+                state["final_report"] = """
+# ⚠️ Gemini Rate Limit Reached
+
+The Gemini API rate limit has been reached for this API key.
+
+Please wait for the quota to reset or use an API project
+with available quota.
+"""
+
+                return state
+
+            # ------------------------------------------------
+            # OTHER ERROR
+            # ------------------------------------------------
+
+            else:
+
+                state["final_report"] = f"""
 # ❌ Gemini Error
 
-{str(e)}
+Something went wrong while generating the grocery plan.
 
-Please try again later.
+**Error:**
+{error_message}
+
+Please try again.
 """
+
+                return state
 
     return state
 
@@ -259,19 +325,22 @@ grocery_graph = workflow.compile()
 
 
 # ============================================================
-# GRADIO FUNCTION
+# MAIN GRADIO FUNCTION
 # ============================================================
 
 def grocery_agent(user_request):
 
-    if not user_request.strip():
+    if not user_request or not user_request.strip():
 
-        return "⚠️ Please enter your grocery requirements."
+        return """
+# 👋 Welcome!
+
+Please enter your grocery requirements to generate
+your personalized budget plan.
+"""
 
     result = grocery_graph.invoke({
-
         "user_request": user_request,
-
         "final_report": ""
     })
 
@@ -279,59 +348,344 @@ def grocery_agent(user_request):
 
 
 # ============================================================
-# GRADIO UI
+# PROFESSIONAL UI
 # ============================================================
 
-demo = gr.Interface(
+CSS = """
 
-    fn=grocery_agent,
+/* ================================
+   GLOBAL
+================================ */
 
-    inputs=gr.Textbox(
+body {
+    background: #f5f7fb !important;
+}
 
-        label="🛒 Grocery Requirements",
+.gradio-container {
+    max-width: 1250px !important;
+    margin: auto !important;
+    padding: 25px 35px 40px !important;
+    font-family: Inter, Arial, sans-serif !important;
+}
 
-        placeholder=(
-            "Example: I have ₹3000 for groceries "
-            "for 2 people for 7 days. "
-            "We eat vegetarian Indian food. "
-            "I already have rice and cooking oil."
-        ),
 
-        lines=7
-    ),
+/* ================================
+   HEADER
+================================ */
 
-    outputs=gr.Markdown(),
+.app-header {
+    background: white;
+    border-radius: 18px;
+    padding: 28px 32px;
+    margin-bottom: 24px;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.05);
+}
 
-    title="🛒 Grocery Budget Agent",
+.app-title {
+    font-size: 32px !important;
+    font-weight: 700 !important;
+    color: #111827 !important;
+    margin-bottom: 8px !important;
+}
 
-    description="""
-    AI-powered grocery planning assistant
-    using LangGraph + Google Gemini.
+.app-subtitle {
+    font-size: 15px !important;
+    color: #6b7280 !important;
+}
 
-    Enter your budget, household size,
-    duration, food preferences and
-    ingredients you already have.
-    """,
 
-    examples=[
+/* ================================
+   CARDS
+================================ */
 
-        [
-            "I have ₹3000 for groceries for 2 people "
-            "for 7 days. We eat vegetarian Indian food. "
-            "I already have rice and cooking oil."
-        ],
+.card {
+    background: white;
+    border-radius: 18px;
+    padding: 22px;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.04);
+}
 
-        [
-            "I have ₹5000 for groceries for 3 people "
-            "for 10 days. We eat vegetarian Indian food."
-        ],
 
-        [
-            "I have ₹2000 for groceries for 1 person "
-            "for 7 days. I need simple Indian meals."
-        ]
-    ]
-)
+/* ================================
+   INPUT
+================================ */
+
+.input-title {
+    font-size: 18px !important;
+    font-weight: 600 !important;
+    color: #111827 !important;
+}
+
+textarea {
+    border-radius: 12px !important;
+    border: 1px solid #d1d5db !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    font-size: 15px !important;
+}
+
+textarea:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 2px rgba(99,102,241,0.12) !important;
+}
+
+
+/* ================================
+   BUTTONS
+================================ */
+
+.primary-btn {
+    background: #4f46e5 !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 11px !important;
+    font-weight: 600 !important;
+    font-size: 15px !important;
+    height: 48px !important;
+}
+
+.primary-btn:hover {
+    background: #4338ca !important;
+}
+
+.secondary-btn {
+    border-radius: 11px !important;
+    font-weight: 600 !important;
+}
+
+
+/* ================================
+   OUTPUT
+================================ */
+
+.output-card {
+    background: white;
+    border-radius: 18px;
+    padding: 24px;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.04);
+}
+
+.output-card h1 {
+    color: #111827 !important;
+}
+
+.output-card h2 {
+    color: #374151 !important;
+}
+
+.output-card h3 {
+    color: #4f46e5 !important;
+}
+
+
+/* ================================
+   EXAMPLES
+================================ */
+
+.examples-title {
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    color: #6b7280 !important;
+    margin-top: 12px !important;
+}
+
+
+/* ================================
+   FOOTER
+================================ */
+
+.footer {
+    text-align: center;
+    color: #9ca3af;
+    font-size: 13px;
+    padding-top: 20px;
+}
+
+"""
+
+
+# ============================================================
+# GRADIO BLOCKS UI
+# ============================================================
+
+with gr.Blocks(
+    title="Grocery Budget Agent",
+    css=CSS,
+    theme=gr.themes.Soft(
+        primary_hue="indigo",
+        neutral_hue="slate"
+    )
+) as demo:
+
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
+    gr.HTML(
+        """
+        <div class="app-header">
+            <div class="app-title">
+                🛒 Grocery Budget Agent
+            </div>
+
+            <div class="app-subtitle">
+                AI-powered grocery planning assistant using
+                LangGraph + Google Gemini.
+            </div>
+        </div>
+        """
+    )
+
+
+    # --------------------------------------------------------
+    # MAIN SECTION
+    # --------------------------------------------------------
+
+    with gr.Row(equal_height=True):
+
+        # LEFT SIDE
+        with gr.Column(scale=1):
+
+            with gr.Group(elem_classes="card"):
+
+                gr.Markdown(
+                    "### 📝 Your Grocery Requirements",
+                    elem_classes="input-title"
+                )
+
+                user_input = gr.Textbox(
+                    show_label=False,
+                    placeholder=(
+                        "Example:\n\n"
+                        "I have ₹3000 for groceries for 2 people "
+                        "for 7 days. We eat vegetarian Indian food. "
+                        "I already have rice and cooking oil."
+                    ),
+                    lines=9
+                )
+
+                with gr.Row():
+
+                    clear_btn = gr.Button(
+                        "Clear",
+                        variant="secondary",
+                        elem_classes="secondary-btn"
+                    )
+
+                    submit_btn = gr.Button(
+                        "✨ Generate Plan",
+                        variant="primary",
+                        elem_classes="primary-btn"
+                    )
+
+
+            # ------------------------------------------------
+            # QUICK EXAMPLES
+            # ------------------------------------------------
+
+            gr.Markdown(
+                "### 💡 Try an example",
+                elem_classes="examples-title"
+            )
+
+            gr.Examples(
+                examples=[
+                    [
+                        "I have ₹3000 for groceries for 2 people "
+                        "for 7 days. We eat vegetarian Indian food. "
+                        "I already have rice and cooking oil."
+                    ],
+                    [
+                        "I have ₹5000 for groceries for 3 people "
+                        "for 10 days. We eat vegetarian Indian food."
+                    ],
+                    [
+                        "I have ₹2000 for groceries for 1 person "
+                        "for 7 days. I need simple Indian meals."
+                    ],
+                    [
+                        "I have ₹4000 for groceries for 2 people "
+                        "for 7 days. We eat high-protein food."
+                    ]
+                ],
+                inputs=user_input,
+                label=""
+            )
+
+
+        # RIGHT SIDE
+        with gr.Column(scale=1):
+
+            with gr.Group(elem_classes="output-card"):
+
+                gr.Markdown(
+                    "### 📊 Your Personalized Grocery Plan"
+                )
+
+                output = gr.Markdown(
+                    value="""
+### 👋 Welcome!
+
+Enter your grocery requirements on the left and click
+**Generate Plan**.
+
+Your AI-generated plan will include:
+
+- 💰 Budget breakdown
+- 🛍️ Grocery shopping list
+- 🍽️ Meal plan
+- 📦 Recommended quantities
+- 💡 Budget optimization
+- 💰 Money-saving tips
+- ✅ Shopping checklist
+"""
+                )
+
+
+    # --------------------------------------------------------
+    # FOOTER
+    # --------------------------------------------------------
+
+    gr.HTML(
+        """
+        <div class="footer">
+            Grocery Budget Agent • LangGraph + Gemini 3.7 Flash
+            <br>
+            Prices shown are demonstration prices only.
+        </div>
+        """
+    )
+
+
+    # ========================================================
+    # BUTTON ACTIONS
+    # ========================================================
+
+    submit_btn.click(
+        fn=grocery_agent,
+        inputs=user_input,
+        outputs=output
+    )
+
+    user_input.submit(
+        fn=grocery_agent,
+        inputs=user_input,
+        outputs=output
+    )
+
+    clear_btn.click(
+        fn=lambda: ("", """
+### 👋 Welcome!
+
+Enter your grocery requirements on the left and click
+**Generate Plan**.
+"""),
+        inputs=None,
+        outputs=[user_input, output]
+    )
 
 
 # ============================================================
