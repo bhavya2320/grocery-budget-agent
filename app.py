@@ -214,11 +214,41 @@ market prices. Please verify actual prices before purchasing.
 
     try:
 
+        # DEBUG: Check whether execution reaches Gemini
+        print(">>> SENDING REQUEST TO GEMINI")
+
         response = llm.invoke(prompt)
 
-        state["final_report"] = response.content
+        # DEBUG: Check whether Gemini returns
+        print(">>> GEMINI RESPONSE RECEIVED")
+        print(response.content)
+
+        # Handle response content
+        if isinstance(response.content, list):
+
+            text_parts = []
+
+            for item in response.content:
+
+                if isinstance(item, dict):
+
+                    if item.get("text"):
+                        text_parts.append(item["text"])
+
+                elif isinstance(item, str):
+
+                    text_parts.append(item)
+
+            state["final_report"] = "\n".join(text_parts)
+
+        else:
+
+            state["final_report"] = str(response.content)
 
     except Exception as e:
+
+        # DEBUG: Print actual error in VS Code terminal
+        print(">>> ERROR:", e)
 
         state["final_report"] = f"""
 # ❌ Gemini Error
